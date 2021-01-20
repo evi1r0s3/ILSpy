@@ -23,6 +23,7 @@ using System.IO;
 using System.Linq;
 using System.Reflection;
 using System.Reflection.Metadata;
+using System.Reflection.PortableExecutable;
 using System.Text;
 using System.Windows;
 using System.Windows.Controls;
@@ -441,6 +442,10 @@ namespace ICSharpCode.ILSpy
 					{
 						output.WriteLine("// This assembly is signed with a strong name key.");
 					}
+					if (module.Reader.ReadDebugDirectory().Any(d => d.Type == DebugDirectoryEntryType.Reproducible))
+					{
+						output.WriteLine("// This assembly was compiled using the /deterministic option.");
+					}
 					if (metadata.IsAssembly)
 					{
 						var asm = metadata.GetAssemblyDefinition();
@@ -716,6 +721,14 @@ namespace ICSharpCode.ILSpy
 			if (!settings.LiftNullables)
 			{
 				flags &= ~ConversionFlags.UseNullableSpecifierForValueTypes;
+			}
+			if (settings.RecordClasses)
+			{
+				flags |= ConversionFlags.SupportRecordClasses;
+			}
+			if (settings.InitAccessors)
+			{
+				flags |= ConversionFlags.SupportInitAccessors;
 			}
 			if (entity is IMethod m && m.IsLocalFunction)
 			{
