@@ -16,13 +16,15 @@
 // OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
+#nullable enable
 using System;
-using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.Collections.Specialized;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Threading;
 using System.Xml.Linq;
@@ -39,8 +41,7 @@ namespace ICSharpCode.ILSpy
 		/// <summary>Dirty flag, used to mark modifications so that the list is saved later</summary>
 		bool dirty;
 
-		internal readonly ConcurrentDictionary<(string assemblyName, bool isWinRT, string targetFrameworkIdentifier), LoadedAssembly> assemblyLookupCache = new ConcurrentDictionary<(string assemblyName, bool isWinRT, string targetFrameworkIdentifier), LoadedAssembly>();
-		internal readonly ConcurrentDictionary<string, LoadedAssembly> moduleLookupCache = new ConcurrentDictionary<string, LoadedAssembly>();
+		readonly object lockObj = new object();
 
 		/// <summary>
 		/// The assemblies in this list.
@@ -51,7 +52,14 @@ namespace ICSharpCode.ILSpy
 		/// Technically read accesses need locking when done on non-GUI threads... but whenever possible, use the
 		/// thread-safe <see cref="GetAssemblies()"/> method.
 		/// </remarks>
-		internal readonly ObservableCollection<LoadedAssembly> assemblies = new ObservableCollection<LoadedAssembly>();
+		readonly ObservableCollection<LoadedAssembly> assemblies = new ObservableCollection<LoadedAssembly>();
+
+		/// <summary>
+		/// Assembly lookup by filename.
+		/// Usually byFilename.Values == assemblies; but when an assembly is loaded by a background thread,
+		/// that assembly is added to byFilename immediately, and to assemblies only later on the main thread.
+		/// </summary>
+		readonly Dictionary<string, LoadedAssembly> byFilename = new Dictionary<string, LoadedAssembly>(StringComparer.OrdinalIgnoreCase);
 
 		public AssemblyList(string listName)
 		{
@@ -81,14 +89,85 @@ namespace ICSharpCode.ILSpy
 			this.assemblies.AddRange(list.assemblies);
 		}
 
+		public event NotifyCollectionChangedEventHandler CollectionChanged {
+			add {
+				App.Current.Dispatcher.VerifyAccess();
+				this.assemblies.CollectionChanged += value;
+			}
+			remove {
+				App.Current.Dispatcher.VerifyAccess();
+				this.assemblies.CollectionChanged -= value;
+			}
+		}
+
 		/// <summary>
 		/// Gets the loaded assemblies. This method is thread-safe.
 		/// </summary>
 		public LoadedAssembly[] GetAssemblies()
 		{
-			lock (assemblies)
+			lock (lockObj)
 			{
 				return assemblies.ToArray();
+			}
+		}
+
+		/// <summary>
+		/// Gets all loaded assemblies recursively, including assemblies found in bundles or packages.
+		/// </summary>
+		public async Task<IList<LoadedAssembly>> GetAllAssemblies()
+		{
+			var assemblies = GetAssemblies();
+			var results = new List<LoadedAssembly>(assemblies.Length);
+
+			foreach (var asm in assemblies)
+			{
+				LoadedAssembly.LoadResult result;
+				try
+				{
+					result = await asm.GetLoadResultAsync();
+				}
+				catch
+				{
+					results.Add(asm);
+					continue;
+				}
+				if (result.Package != null)
+				{
+					AddDescendants(result.Package.RootFolder);
+				}
+				else if (result.PEFile != null)
+				{
+					results.Add(asm);
+				}
+			}
+
+			void AddDescendants(PackageFolder folder)
+			{
+				foreach (var subFolder in folder.Folders)
+				{
+					AddDescendants(subFolder);
+				}
+
+				foreach (var entry in folder.Entries)
+				{
+					if (!entry.Name.EndsWith(".dll", StringComparison.OrdinalIgnoreCase))
+						continue;
+					var asm = folder.ResolveFileName(entry.Name);
+					if (asm == null)
+						continue;
+					results.Add(asm);
+				}
+			}
+
+			return results;
+		}
+
+		public int Count {
+			get {
+				lock (lockObj)
+				{
+					return assemblies.Count;
+				}
 			}
 		}
 
@@ -111,9 +190,30 @@ namespace ICSharpCode.ILSpy
 			get { return listName; }
 		}
 
+		internal void Move(LoadedAssembly[] assembliesToMove, int index)
+		{
+			App.Current.Dispatcher.VerifyAccess();
+			lock (lockObj)
+			{
+				foreach (LoadedAssembly asm in assembliesToMove)
+				{
+					int nodeIndex = assemblies.IndexOf(asm);
+					Debug.Assert(nodeIndex >= 0);
+					if (nodeIndex < index)
+						index--;
+					assemblies.RemoveAt(nodeIndex);
+				}
+				Array.Reverse(assembliesToMove);
+				foreach (LoadedAssembly asm in assembliesToMove)
+				{
+					assemblies.Insert(index, asm);
+				}
+			}
+		}
+
 		void Assemblies_CollectionChanged(object sender, NotifyCollectionChangedEventArgs e)
 		{
-			ClearCache();
+			Debug.Assert(Monitor.IsEntered(lockObj));
 			if (CollectionChangeHasEffectOnSave(e))
 			{
 				RefreshSave();
@@ -155,10 +255,18 @@ namespace ICSharpCode.ILSpy
 			}
 		}
 
-		internal void ClearCache()
+		/// <summary>
+		/// Find an assembly that was previously opened.
+		/// </summary>
+		public LoadedAssembly? FindAssembly(string file)
 		{
-			assemblyLookupCache.Clear();
-			moduleLookupCache.Clear();
+			file = Path.GetFullPath(file);
+			lock (lockObj)
+			{
+				if (byFilename.TryGetValue(file, out var asm))
+					return asm;
+			}
+			return null;
 		}
 
 		public LoadedAssembly Open(string assemblyUri, bool isAutoLoaded = false)
@@ -170,74 +278,91 @@ namespace ICSharpCode.ILSpy
 		/// Opens an assembly from disk.
 		/// Returns the existing assembly node if it is already loaded.
 		/// </summary>
+		/// <remarks>
+		/// If called on the UI thread, the newly opened assembly is added to the list synchronously.
+		/// If called on another thread, the newly opened assembly won't be returned by GetAssemblies()
+		/// until the UI thread gets around to adding the assembly.
+		/// </remarks>
 		public LoadedAssembly OpenAssembly(string file, bool isAutoLoaded = false)
 		{
-			App.Current.Dispatcher.VerifyAccess();
-
 			file = Path.GetFullPath(file);
-
-			foreach (LoadedAssembly asm in this.assemblies)
-			{
-				if (file.Equals(asm.FileName, StringComparison.OrdinalIgnoreCase))
-					return asm;
-			}
-
-			var newAsm = new LoadedAssembly(this, file);
-			newAsm.IsAutoLoaded = isAutoLoaded;
-			lock (assemblies)
-			{
-				this.assemblies.Add(newAsm);
-			}
-			return newAsm;
+			return OpenAssembly(file, () => {
+				var newAsm = new LoadedAssembly(this, file);
+				newAsm.IsAutoLoaded = isAutoLoaded;
+				return newAsm;
+			});
 		}
 
 		/// <summary>
 		/// Opens an assembly from a stream.
 		/// </summary>
-		public LoadedAssembly OpenAssembly(string file, Stream stream, bool isAutoLoaded = false)
+		public LoadedAssembly OpenAssembly(string file, Stream? stream, bool isAutoLoaded = false)
 		{
-			App.Current.Dispatcher.VerifyAccess();
+			file = Path.GetFullPath(file);
+			return OpenAssembly(file, () => {
+				var newAsm = new LoadedAssembly(this, file, stream: Task.FromResult(stream));
+				newAsm.IsAutoLoaded = isAutoLoaded;
+				return newAsm;
+			});
+		}
 
-			foreach (LoadedAssembly asm in this.assemblies)
+		LoadedAssembly OpenAssembly(string file, Func<LoadedAssembly> load)
+		{
+			bool isUIThread = App.Current.Dispatcher.Thread == Thread.CurrentThread;
+
+			LoadedAssembly asm;
+			lock (lockObj)
 			{
-				if (file.Equals(asm.FileName, StringComparison.OrdinalIgnoreCase))
+				if (byFilename.TryGetValue(file, out asm))
 					return asm;
-			}
+				asm = load();
+				Debug.Assert(asm.FileName == file);
+				byFilename.Add(asm.FileName, asm);
 
-			var newAsm = new LoadedAssembly(this, file, stream: Task.FromResult(stream));
-			newAsm.IsAutoLoaded = isAutoLoaded;
-			lock (assemblies)
-			{
-				this.assemblies.Add(newAsm);
+				if (isUIThread)
+				{
+					assemblies.Add(asm);
+				}
 			}
-			return newAsm;
+			if (!isUIThread)
+			{
+				App.Current.Dispatcher.BeginInvoke((Action)delegate () {
+					lock (lockObj)
+					{
+						assemblies.Add(asm);
+					}
+				}, DispatcherPriority.Normal);
+			}
+			return asm;
 		}
 
 		/// <summary>
 		/// Replace the assembly object model from a crafted stream, without disk I/O
 		/// Returns null if it is not already loaded.
 		/// </summary>
-		public LoadedAssembly HotReplaceAssembly(string file, Stream stream)
+		public LoadedAssembly? HotReplaceAssembly(string file, Stream stream)
 		{
 			App.Current.Dispatcher.VerifyAccess();
 			file = Path.GetFullPath(file);
-
-			var target = this.assemblies.FirstOrDefault(asm => file.Equals(asm.FileName, StringComparison.OrdinalIgnoreCase));
-			if (target == null)
-				return null;
-
-			var index = this.assemblies.IndexOf(target);
-			var newAsm = new LoadedAssembly(this, file, stream: Task.FromResult(stream));
-			newAsm.IsAutoLoaded = target.IsAutoLoaded;
-			lock (assemblies)
+			lock (lockObj)
 			{
-				this.assemblies.Remove(target);
-				this.assemblies.Insert(index, newAsm);
+				if (!byFilename.TryGetValue(file, out LoadedAssembly target))
+					return null;
+				int index = this.assemblies.IndexOf(target);
+				if (index < 0)
+					return null;
+
+				var newAsm = new LoadedAssembly(this, file, stream: Task.FromResult<Stream?>(stream));
+				newAsm.IsAutoLoaded = target.IsAutoLoaded;
+
+				Debug.Assert(newAsm.FileName == file);
+				byFilename[file] = newAsm;
+				this.assemblies[index] = newAsm;
+				return newAsm;
 			}
-			return newAsm;
 		}
 
-		public LoadedAssembly ReloadAssembly(string file)
+		public LoadedAssembly? ReloadAssembly(string file)
 		{
 			App.Current.Dispatcher.VerifyAccess();
 			file = Path.GetFullPath(file);
@@ -249,12 +374,15 @@ namespace ICSharpCode.ILSpy
 			return ReloadAssembly(target);
 		}
 
-		public LoadedAssembly ReloadAssembly(LoadedAssembly target)
+		public LoadedAssembly? ReloadAssembly(LoadedAssembly target)
 		{
+			App.Current.Dispatcher.VerifyAccess();
 			var index = this.assemblies.IndexOf(target);
+			if (index < 0)
+				return null;
 			var newAsm = new LoadedAssembly(this, target.FileName, pdbFileName: target.PdbFileName);
 			newAsm.IsAutoLoaded = target.IsAutoLoaded;
-			lock (assemblies)
+			lock (lockObj)
 			{
 				this.assemblies.Remove(target);
 				this.assemblies.Insert(index, newAsm);
@@ -265,16 +393,17 @@ namespace ICSharpCode.ILSpy
 		public void Unload(LoadedAssembly assembly)
 		{
 			App.Current.Dispatcher.VerifyAccess();
-			lock (assemblies)
+			lock (lockObj)
 			{
 				assemblies.Remove(assembly);
+				byFilename.Remove(assembly.FileName);
 			}
 			RequestGC();
 		}
 
 		static bool gcRequested;
 
-		void RequestGC()
+		static void RequestGC()
 		{
 			if (gcRequested)
 				return;
@@ -294,7 +423,7 @@ namespace ICSharpCode.ILSpy
 		public void Sort(int index, int count, IComparer<LoadedAssembly> comparer)
 		{
 			App.Current.Dispatcher.VerifyAccess();
-			lock (assemblies)
+			lock (lockObj)
 			{
 				List<LoadedAssembly> list = new List<LoadedAssembly>(assemblies);
 				list.Sort(index, Math.Min(count, list.Count - index), comparer);

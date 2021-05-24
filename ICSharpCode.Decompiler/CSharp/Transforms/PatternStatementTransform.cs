@@ -103,7 +103,8 @@ namespace ICSharpCode.Decompiler.CSharp.Transforms
 
 		public override AstNode VisitPropertyDeclaration(PropertyDeclaration propertyDeclaration)
 		{
-			if (context.Settings.AutomaticProperties)
+			if (context.Settings.AutomaticProperties
+				&& (!propertyDeclaration.Setter.IsNull || context.Settings.GetterOnlyAutomaticProperties))
 			{
 				AstNode result = TransformAutomaticProperty(propertyDeclaration);
 				if (result != null)
@@ -350,6 +351,8 @@ namespace ICSharpCode.Decompiler.CSharp.Transforms
 			var loopContainer = forStatement.Annotation<IL.BlockContainer>();
 			if (itemVariable == null || indexVariable == null || arrayVariable == null)
 				return null;
+			if (arrayVariable.Type.Kind != TypeKind.Array)
+				return null;
 			if (!VariableCanBeUsedAsForeachLocal(itemVariable, forStatement))
 				return null;
 			if (indexVariable.StoreCount != 2 || indexVariable.LoadCount != 3 || indexVariable.AddressCount != 0)
@@ -461,6 +464,8 @@ namespace ICSharpCode.Decompiler.CSharp.Transforms
 				lowerBounds[i] = indexVariable;
 				i++;
 			}
+			if (collection.Type.Kind != TypeKind.Array)
+				return false;
 			var m2 = foreachVariableOnMultArrayAssignPattern.Match(stmt);
 			if (!m2.Success)
 				return false;
@@ -625,7 +630,7 @@ namespace ICSharpCode.Decompiler.CSharp.Transforms
 			}
 			if (field == null || !NameCouldBeBackingFieldOfAutomaticProperty(field.Name, out _))
 				return null;
-			if (propertyDeclaration.Setter.HasModifier(Modifiers.Readonly))
+			if (propertyDeclaration.Setter.HasModifier(Modifiers.Readonly) || (propertyDeclaration.HasModifier(Modifiers.Readonly) && !propertyDeclaration.Setter.IsNull))
 				return null;
 			if (field.IsCompilerGenerated() && field.DeclaringTypeDefinition == property.DeclaringTypeDefinition)
 			{
@@ -633,6 +638,7 @@ namespace ICSharpCode.Decompiler.CSharp.Transforms
 				RemoveCompilerGeneratedAttribute(propertyDeclaration.Setter.Attributes);
 				propertyDeclaration.Getter.Body = null;
 				propertyDeclaration.Setter.Body = null;
+				propertyDeclaration.Modifiers &= ~Modifiers.Readonly;
 				propertyDeclaration.Getter.Modifiers &= ~Modifiers.Readonly;
 
 				// Add C# 7.3 attributes on backing field:
@@ -738,6 +744,8 @@ namespace ICSharpCode.Decompiler.CSharp.Transforms
 				if (field != null && IsBackingFieldOfAutomaticProperty(field, out var property)
 					&& CanTransformToAutomaticProperty(property) && currentMethod.AccessorOwner != property)
 				{
+					if (!property.CanSet && !context.Settings.GetterOnlyAutomaticProperties)
+						return null;
 					parent.RemoveAnnotations<MemberResolveResult>();
 					parent.AddAnnotation(new MemberResolveResult(mrr.TargetResult, property));
 					return Identifier.Create(property.Name);
@@ -983,7 +991,8 @@ namespace ICSharpCode.Decompiler.CSharp.Transforms
 		{
 			if (!ev.PrivateImplementationType.IsNull)
 				return null;
-			if (!ev.Modifiers.HasFlag(Modifiers.Abstract))
+			const Modifiers withoutBody = Modifiers.Abstract | Modifiers.Extern;
+			if ((ev.Modifiers & withoutBody) == 0 && ev.GetSymbol() is IEvent symbol && symbol.DeclaringType.Kind != TypeKind.Interface)
 			{
 				if (!CheckAutomaticEventV4AggressivelyInlined(ev) && !CheckAutomaticEventV4(ev) && !CheckAutomaticEventV2(ev) && !CheckAutomaticEventV4MCS(ev))
 					return null;

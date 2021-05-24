@@ -75,10 +75,13 @@ namespace ICSharpCode.Decompiler.Metadata
 		readonly List<string> packageBasePaths = new List<string>();
 		readonly Version targetFrameworkVersion;
 		readonly string dotnetBasePath = FindDotNetExeDirectory();
+		readonly string preferredRuntimePack;
 
-		public DotNetCorePathFinder(TargetFrameworkIdentifier targetFramework, Version targetFrameworkVersion)
+		public DotNetCorePathFinder(TargetFrameworkIdentifier targetFramework, Version targetFrameworkVersion,
+			string preferredRuntimePack)
 		{
 			this.targetFrameworkVersion = targetFrameworkVersion;
+			this.preferredRuntimePack = preferredRuntimePack;
 
 			if (targetFramework == TargetFrameworkIdentifier.NETStandard)
 			{
@@ -90,8 +93,9 @@ namespace ICSharpCode.Decompiler.Metadata
 			}
 		}
 
-		public DotNetCorePathFinder(string parentAssemblyFileName, string targetFrameworkIdString, TargetFrameworkIdentifier targetFramework, Version targetFrameworkVersion, ReferenceLoadInfo loadInfo = null)
-			: this(targetFramework, targetFrameworkVersion)
+		public DotNetCorePathFinder(string parentAssemblyFileName, string targetFrameworkIdString, string preferredRuntimePack,
+			TargetFrameworkIdentifier targetFramework, Version targetFrameworkVersion, ReferenceLoadInfo loadInfo = null)
+			: this(targetFramework, targetFrameworkVersion, preferredRuntimePack)
 		{
 			string assemblyName = Path.GetFileNameWithoutExtension(parentAssemblyFileName);
 			string basePath = Path.GetDirectoryName(parentAssemblyFileName);
@@ -203,7 +207,15 @@ namespace ICSharpCode.Decompiler.Metadata
 				runtimePack = null;
 				return null;
 			}
-			foreach (string pack in RuntimePacks)
+
+			IEnumerable<string> runtimePacks = RuntimePacks;
+
+			if (preferredRuntimePack != null)
+			{
+				runtimePacks = new[] { preferredRuntimePack }.Concat(runtimePacks);
+			}
+
+			foreach (string pack in runtimePacks)
 			{
 				runtimePack = pack;
 				string basePath = Path.Combine(dotnetBasePath, "shared", pack);
@@ -274,9 +286,7 @@ namespace ICSharpCode.Decompiler.Metadata
 					{
 						if ((new FileInfo(fileName).Attributes & FileAttributes.ReparsePoint) == FileAttributes.ReparsePoint)
 						{
-							var sb = new StringBuilder();
-							realpath(fileName, sb);
-							fileName = sb.ToString();
+							fileName = GetRealPath(fileName, Encoding.Default);
 							if (!File.Exists(fileName))
 								continue;
 						}
@@ -288,7 +298,33 @@ namespace ICSharpCode.Decompiler.Metadata
 			return null;
 		}
 
-		[DllImport("libc")]
-		static extern void realpath(string path, StringBuilder resolvedPath);
+		static unsafe string GetRealPath(string path, Encoding encoding)
+		{
+			var bytes = encoding.GetBytes(path);
+			fixed (byte* input = bytes)
+			{
+
+				byte* output = GetRealPath(input, null);
+				if (output == null)
+				{
+					return null;
+				}
+				int len = 0;
+				for (byte* c = output; *c != 0; c++)
+				{
+					len++;
+				}
+				byte[] result = new byte[len];
+				Marshal.Copy((IntPtr)output, result, 0, result.Length);
+				Free(output);
+				return encoding.GetString(result);
+			}
+		}
+
+		[DllImport("libc", EntryPoint = "realpath")]
+		static extern unsafe byte* GetRealPath(byte* path, byte* resolvedPath);
+
+		[DllImport("libc", EntryPoint = "free")]
+		static extern unsafe void Free(void* ptr);
 	}
 }

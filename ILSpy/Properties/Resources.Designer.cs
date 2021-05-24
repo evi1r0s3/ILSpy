@@ -523,6 +523,15 @@ namespace ICSharpCode.ILSpy.Properties {
         }
         
         /// <summary>
+        ///   Looks up a localized string similar to Could not use SDK-style project format, because no compatible target-framework moniker was found..
+        /// </summary>
+        public static string CouldNotUseSdkStyleProjectFormat {
+            get {
+                return ResourceManager.GetString("CouldNotUseSdkStyleProjectFormat", resourceCulture);
+            }
+        }
+        
+        /// <summary>
         ///   Looks up a localized string similar to Create.
         /// </summary>
         public static string Create {
@@ -537,6 +546,15 @@ namespace ICSharpCode.ILSpy.Properties {
         public static string CultureLabel {
             get {
                 return ResourceManager.GetString("CultureLabel", resourceCulture);
+            }
+        }
+        
+        /// <summary>
+        ///   Looks up a localized string similar to Dark Mode.
+        /// </summary>
+        public static string DarkMode {
+            get {
+                return ResourceManager.GetString("DarkMode", resourceCulture);
             }
         }
         
@@ -924,6 +942,15 @@ namespace ICSharpCode.ILSpy.Properties {
         public static string DecompilerSettings_FunctionPointers {
             get {
                 return ResourceManager.GetString("DecompilerSettings.FunctionPointers", resourceCulture);
+            }
+        }
+        
+        /// <summary>
+        ///   Looks up a localized string similar to Decompile getter-only automatic properties.
+        /// </summary>
+        public static string DecompilerSettings_GetterOnlyAutomaticProperties {
+            get {
+                return ResourceManager.GetString("DecompilerSettings.GetterOnlyAutomaticProperties", resourceCulture);
             }
         }
         
@@ -1578,7 +1605,7 @@ namespace ICSharpCode.ILSpy.Properties {
         }
         
         /// <summary>
-        ///   Looks up a localized string similar to Hightlight current line.
+        ///   Looks up a localized string similar to Highlight current line.
         /// </summary>
         public static string HighlightCurrentLine {
             get {
@@ -1646,6 +1673,15 @@ namespace ICSharpCode.ILSpy.Properties {
         public static string InsertUsingDeclarations {
             get {
                 return ResourceManager.GetString("InsertUsingDeclarations", resourceCulture);
+            }
+        }
+        
+        /// <summary>
+        ///   Looks up a localized string similar to Language.
+        /// </summary>
+        public static string Language {
+            get {
+                return ResourceManager.GetString("Language", resourceCulture);
             }
         }
         
@@ -1755,6 +1791,15 @@ namespace ICSharpCode.ILSpy.Properties {
         public static string NavigationFailed {
             get {
                 return ResourceManager.GetString("NavigationFailed", resourceCulture);
+            }
+        }
+        
+        /// <summary>
+        ///   Looks up a localized string similar to .NET version .
+        /// </summary>
+        public static string NETFrameworkVersion {
+            get {
+                return ResourceManager.GetString("NETFrameworkVersion", resourceCulture);
             }
         }
         
@@ -2193,6 +2238,15 @@ namespace ICSharpCode.ILSpy.Properties {
         }
         
         /// <summary>
+        ///   Looks up a localized string similar to You must restart ILSpy for the change to take effect..
+        /// </summary>
+        public static string SettingsChangeRestartRequired {
+            get {
+                return ResourceManager.GetString("SettingsChangeRestartRequired", resourceCulture);
+            }
+        }
+        
+        /// <summary>
         ///   Looks up a localized string similar to Shell.
         /// </summary>
         public static string Shell {
@@ -2409,6 +2463,15 @@ namespace ICSharpCode.ILSpy.Properties {
         }
         
         /// <summary>
+        ///   Looks up a localized string similar to Style the window title bar.
+        /// </summary>
+        public static string StyleTheWindowTitleBar {
+            get {
+                return ResourceManager.GetString("StyleTheWindowTitleBar", resourceCulture);
+            }
+        }
+        
+        /// <summary>
         ///   Looks up a localized string similar to Tab size:.
         /// </summary>
         public static string TabSize {
@@ -2432,6 +2495,15 @@ namespace ICSharpCode.ILSpy.Properties {
         public static string Type {
             get {
                 return ResourceManager.GetString("Type", resourceCulture);
+            }
+        }
+        
+        /// <summary>
+        ///   Looks up a localized string similar to System.
+        /// </summary>
+        public static string UILanguage_System {
+            get {
+                return ResourceManager.GetString("UILanguage_System", resourceCulture);
             }
         }
         

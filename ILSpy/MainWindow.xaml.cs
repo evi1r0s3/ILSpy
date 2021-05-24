@@ -36,6 +36,8 @@ using System.Windows.Media.Imaging;
 using System.Windows.Navigation;
 using System.Windows.Threading;
 
+using AvalonDock.Layout.Serialization;
+
 using ICSharpCode.Decompiler;
 using ICSharpCode.Decompiler.Documentation;
 using ICSharpCode.Decompiler.Metadata;
@@ -44,15 +46,12 @@ using ICSharpCode.Decompiler.TypeSystem.Implementation;
 using ICSharpCode.ILSpy.Analyzers;
 using ICSharpCode.ILSpy.Docking;
 using ICSharpCode.ILSpy.TextView;
+using ICSharpCode.ILSpy.Themes;
 using ICSharpCode.ILSpy.TreeNodes;
 using ICSharpCode.ILSpy.ViewModels;
 using ICSharpCode.TreeView;
 
 using Microsoft.Win32;
-
-using OSVersionHelper;
-
-using Xceed.Wpf.AvalonDock.Layout.Serialization;
 
 namespace ICSharpCode.ILSpy
 {
@@ -68,7 +67,7 @@ namespace ICSharpCode.ILSpy
 	/// </summary>
 	partial class MainWindow : Window
 	{
-		bool refreshInProgress;
+		bool refreshInProgress, changingActiveTab;
 		readonly NavigationHistory<NavigationState> history = new NavigationHistory<NavigationState>();
 		ILSpySettings spySettingsForMainWindow_Loaded;
 		internal SessionSettings sessionSettings;
@@ -113,7 +112,8 @@ namespace ICSharpCode.ILSpy
 			this.sessionSettings = new SessionSettings(spySettings);
 			this.AssemblyListManager = new AssemblyListManager(spySettings);
 
-			this.Icon = new BitmapImage(new Uri("pack://application:,,,/ILSpy;component/images/ILSpy.ico"));
+			// Make sure Images are initialized on the UI thread.
+			this.Icon = Images.ILSpyIcon;
 
 			this.DataContext = new MainWindowDataContext {
 				Workspace = DockWorkspace.Instance,
@@ -122,7 +122,10 @@ namespace ICSharpCode.ILSpy
 			};
 
 			AssemblyListManager.CreateDefaultAssemblyLists();
-
+			if (!string.IsNullOrEmpty(sessionSettings.CurrentCulture))
+			{
+				System.Threading.Thread.CurrentThread.CurrentUICulture = new System.Globalization.CultureInfo(sessionSettings.CurrentCulture);
+			}
 			DockWorkspace.Instance.LoadSettings(sessionSettings);
 			InitializeComponent();
 			InitToolPanes();
@@ -138,9 +141,19 @@ namespace ICSharpCode.ILSpy
 
 		private void SessionSettings_PropertyChanged(object sender, PropertyChangedEventArgs e)
 		{
-			if (e.PropertyName == "ActiveAssemblyList")
+			switch (e.PropertyName)
 			{
-				ShowAssemblyList(sessionSettings.ActiveAssemblyList);
+				case nameof(SessionSettings.ActiveAssemblyList):
+					ShowAssemblyList(sessionSettings.ActiveAssemblyList);
+					break;
+				case nameof(SessionSettings.IsDarkMode):
+					// update syntax highlighting and force reload (AvalonEdit does not automatically refresh on highlighting change)
+					DecompilerTextView.RegisterHighlighting();
+					DecompileSelectedNodes(DockWorkspace.Instance.ActiveTabPage.GetState() as DecompilerTextViewState);
+					break;
+				case nameof(SessionSettings.CurrentCulture):
+					MessageBox.Show(Properties.Resources.SettingsChangeRestartRequired, "ILSpy");
+					break;
 			}
 		}
 
@@ -191,6 +204,7 @@ namespace ICSharpCode.ILSpy
 		Button MakeToolbarItem(Lazy<ICommand, IToolbarCommandMetadata> command)
 		{
 			return new Button {
+				Style = ThemeManager.Current.CreateToolBarButtonStyle(),
 				Command = CommandWrapper.Unwrap(command.Value),
 				ToolTip = Properties.Resources.ResourceManager.GetString(command.Metadata.ToolTip),
 				Tag = command.Metadata.Tag,
@@ -679,7 +693,7 @@ namespace ICSharpCode.ILSpy
 		public async Task ShowMessageIfUpdatesAvailableAsync(ILSpySettings spySettings, bool forceCheck = false)
 		{
 			// Don't check for updates if we're in an MSIX since they work differently
-			if (WindowsVersionHelper.HasPackageIdentity)
+			if (StorePackageHelper.HasPackageIdentity)
 			{
 				return;
 			}
@@ -747,9 +761,13 @@ namespace ICSharpCode.ILSpy
 		void ShowAssemblyList(AssemblyList assemblyList)
 		{
 			history.Clear();
-			this.assemblyList = assemblyList;
+			if (this.assemblyList != null)
+			{
+				this.assemblyList.CollectionChanged -= assemblyList_Assemblies_CollectionChanged;
+			}
 
-			assemblyList.assemblies.CollectionChanged += assemblyList_Assemblies_CollectionChanged;
+			this.assemblyList = assemblyList;
+			assemblyList.CollectionChanged += assemblyList_Assemblies_CollectionChanged;
 
 			assemblyListTreeNode = new AssemblyListTreeNode(assemblyList);
 			assemblyListTreeNode.FilterSettings = sessionSettings.FilterSettings.Clone();
@@ -783,8 +801,7 @@ namespace ICSharpCode.ILSpy
 					nd => nd.AncestorsAndSelf().OfType<AssemblyTreeNode>().Any(
 						a => oldAssemblies.Contains(a.LoadedAssembly))));
 			}
-			if (CurrentAssemblyListChanged != null)
-				CurrentAssemblyListChanged(this, e);
+			CurrentAssemblyListChanged?.Invoke(this, e);
 		}
 
 		void LoadInitialAssemblies()
@@ -887,27 +904,48 @@ namespace ICSharpCode.ILSpy
 
 		public void SelectNodes(IEnumerable<SharpTreeNode> nodes, bool inNewTabPage, bool setFocus)
 		{
-			if (nodes.Any() && nodes.All(n => !n.AncestorsAndSelf().Any(a => a.IsHidden)))
-			{
-				if (inNewTabPage)
-				{
-					DockWorkspace.Instance.TabPages.Add(
-						new TabPageModel() {
-							Language = CurrentLanguage,
-							LanguageVersion = CurrentLanguageVersion
-						});
-					DockWorkspace.Instance.ActiveTabPage = DockWorkspace.Instance.TabPages.Last();
-				}
+			SelectNodes(nodes, inNewTabPage, setFocus, false);
+		}
 
+		internal void SelectNodes(IEnumerable<SharpTreeNode> nodes, bool inNewTabPage,
+			bool setFocus, bool changingActiveTab)
+		{
+			if (inNewTabPage)
+			{
+				DockWorkspace.Instance.TabPages.Add(
+					new TabPageModel() {
+						Language = CurrentLanguage,
+						LanguageVersion = CurrentLanguageVersion
+					});
+				DockWorkspace.Instance.ActiveTabPage = DockWorkspace.Instance.TabPages.Last();
+			}
+
+			// Ensure nodes exist
+			var nodesList = nodes.Select(n => FindNodeByPath(GetPathForNode(n), true))
+				.Where(n => n != null).ToArray();
+
+			if (!nodesList.Any() || !nodesList.All(n => !n.AncestorsAndSelf().Any(a => a.IsHidden)))
+			{
+				return;
+			}
+
+			this.changingActiveTab = changingActiveTab || inNewTabPage;
+			try
+			{
 				if (setFocus)
 				{
-					AssemblyTreeView.FocusNode(nodes.First());
+					AssemblyTreeView.FocusNode(nodesList[0]);
 				}
 				else
 				{
-					AssemblyTreeView.ScrollIntoView(nodes.First());
+					AssemblyTreeView.ScrollIntoView(nodesList[0]);
 				}
-				AssemblyTreeView.SetSelectedNodes(nodes);
+
+				AssemblyTreeView.SetSelectedNodes(nodesList);
+			}
+			finally
+			{
+				this.changingActiveTab = false;
 			}
 		}
 
@@ -1015,7 +1053,11 @@ namespace ICSharpCode.ILSpy
 					break;
 				case EntityReference unresolvedEntity:
 					string protocol = unresolvedEntity.Protocol ?? "decompile";
-					PEFile file = unresolvedEntity.Module;
+					PEFile file = unresolvedEntity.ResolveAssembly(assemblyList);
+					if (file == null)
+					{
+						break;
+					}
 					if (protocol != "decompile")
 					{
 						var protocolHandlers = App.ExportProvider.GetExports<IProtocolHandler>();
@@ -1159,7 +1201,12 @@ namespace ICSharpCode.ILSpy
 		#region Decompile (TreeView_SelectionChanged)
 		void TreeView_SelectionChanged(object sender, SelectionChangedEventArgs e)
 		{
-			DecompileSelectedNodes();
+			DecompilerTextViewState state = null;
+			if (refreshInProgress || changingActiveTab)
+			{
+				state = DockWorkspace.Instance.ActiveTabPage.GetState() as DecompilerTextViewState;
+			}
+			DecompileSelectedNodes(state);
 
 			SelectionChanged?.Invoke(sender, e);
 		}
@@ -1177,10 +1224,11 @@ namespace ICSharpCode.ILSpy
 
 			if (recordHistory)
 			{
-				var currentState = DockWorkspace.Instance.ActiveTabPage.GetState();
+				var tabPage = DockWorkspace.Instance.ActiveTabPage;
+				var currentState = tabPage.GetState();
 				if (currentState != null)
-					history.UpdateCurrent(new NavigationState(currentState));
-				history.Record(new NavigationState(AssemblyTreeView.SelectedItems.OfType<SharpTreeNode>()));
+					history.UpdateCurrent(new NavigationState(tabPage, currentState));
+				history.Record(new NavigationState(tabPage, AssemblyTreeView.SelectedItems.OfType<SharpTreeNode>()));
 			}
 
 			DockWorkspace.Instance.ActiveTabPage.SupportsLanguageSwitching = true;
@@ -1196,7 +1244,10 @@ namespace ICSharpCode.ILSpy
 				NavigateTo(new RequestNavigateEventArgs(newState.ViewedUri, null), recordHistory: false);
 				return;
 			}
-			decompilationTask = DockWorkspace.Instance.ActiveTabPage.ShowTextViewAsync(textView => textView.DecompileAsync(this.CurrentLanguage, this.SelectedNodes, new DecompilationOptions() { TextViewState = newState }));
+			var options = new DecompilationOptions() { TextViewState = newState };
+			decompilationTask = DockWorkspace.Instance.ActiveTabPage.ShowTextViewAsync(
+				textView => textView.DecompileAsync(this.CurrentLanguage, this.SelectedNodes, options)
+			);
 		}
 
 		void SaveCommandCanExecute(object sender, CanExecuteRoutedEventArgs e)
@@ -1268,13 +1319,15 @@ namespace ICSharpCode.ILSpy
 
 		void NavigateHistory(bool forward)
 		{
-			var state = DockWorkspace.Instance.ActiveTabPage.GetState();
+			TabPageModel tabPage = DockWorkspace.Instance.ActiveTabPage;
+			var state = tabPage.GetState();
 			if (state != null)
-				history.UpdateCurrent(new NavigationState(state));
+				history.UpdateCurrent(new NavigationState(tabPage, state));
 			var newState = forward ? history.GoForward() : history.GoBack();
 
 			ignoreDecompilationRequests = true;
 			AssemblyTreeView.SelectedItems.Clear();
+			DockWorkspace.Instance.ActiveTabPage = newState.TabPage;
 			foreach (var node in newState.TreeNodes)
 			{
 				AssemblyTreeView.SelectedItems.Add(node);
@@ -1333,13 +1386,14 @@ namespace ICSharpCode.ILSpy
 			{
 				if (!recordHistory)
 					return;
-				var currentState = DockWorkspace.Instance.ActiveTabPage.GetState();
+				TabPageModel tabPage = DockWorkspace.Instance.ActiveTabPage;
+				var currentState = tabPage.GetState();
 				if (currentState != null)
-					history.UpdateCurrent(new NavigationState(currentState));
+					history.UpdateCurrent(new NavigationState(tabPage, currentState));
 				ignoreDecompilationRequests = true;
 				UnselectAll();
 				ignoreDecompilationRequests = false;
-				history.Record(new NavigationState(new ViewState { ViewedUri = e.Uri }));
+				history.Record(new NavigationState(tabPage, new ViewState { ViewedUri = e.Uri }));
 			}
 		}
 

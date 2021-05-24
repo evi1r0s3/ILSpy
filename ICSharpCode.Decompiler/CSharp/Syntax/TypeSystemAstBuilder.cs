@@ -320,8 +320,7 @@ namespace ICSharpCode.Decompiler.CSharp.Syntax
 				}
 				else if (fpt.CallingConvention != System.Reflection.Metadata.SignatureCallingConvention.Default)
 				{
-					string callconvName = fpt.CallingConvention switch
-					{
+					string callconvName = fpt.CallingConvention switch {
 						System.Reflection.Metadata.SignatureCallingConvention.CDecl => "Cdecl",
 						System.Reflection.Metadata.SignatureCallingConvention.StdCall => "Stdcall",
 						System.Reflection.Metadata.SignatureCallingConvention.ThisCall => "Thiscall",
@@ -352,8 +351,7 @@ namespace ICSharpCode.Decompiler.CSharp.Syntax
 				for (int i = 0; i < fpt.ParameterTypes.Length; i++)
 				{
 					var paramDecl = new ParameterDeclaration();
-					paramDecl.ParameterModifier = fpt.ParameterReferenceKinds[i] switch
-					{
+					paramDecl.ParameterModifier = fpt.ParameterReferenceKinds[i] switch {
 						ReferenceKind.In => ParameterModifier.In,
 						ReferenceKind.Ref => ParameterModifier.Ref,
 						ReferenceKind.Out => ParameterModifier.Out,
@@ -525,14 +523,13 @@ namespace ICSharpCode.Decompiler.CSharp.Syntax
 				// Handle top-level types
 				if (string.IsNullOrEmpty(genericType.Namespace))
 				{
-					result.Target = new SimpleType("global");
-					if (AddResolveResultAnnotations && resolver != null)
-						result.Target.AddAnnotation(new NamespaceResolveResult(resolver.Compilation.RootNamespace));
+					result.Target = MakeGlobal();
 					result.IsDoubleColon = true;
 				}
 				else
 				{
-					result.Target = ConvertNamespace(genericType.Namespace, out _);
+					result.Target = ConvertNamespace(genericType.Namespace,
+						out _, genericType.Namespace == genericType.Name);
 				}
 			}
 			result.MemberName = genericType.Name;
@@ -606,6 +603,11 @@ namespace ICSharpCode.Decompiler.CSharp.Syntax
 
 		public AstType ConvertNamespace(string namespaceName, out NamespaceResolveResult nrr)
 		{
+			return ConvertNamespace(namespaceName, out nrr, requiresGlobalPrefix: false);
+		}
+
+		AstType ConvertNamespace(string namespaceName, out NamespaceResolveResult nrr, bool requiresGlobalPrefix)
+		{
 			if (resolver != null)
 			{
 				// Look if there's an alias to the target namespace
@@ -633,18 +635,27 @@ namespace ICSharpCode.Decompiler.CSharp.Syntax
 			{
 				if (IsValidNamespace(namespaceName, out nrr))
 				{
-					var ns = MakeSimpleType(namespaceName);
+					AstType ns;
+					if (requiresGlobalPrefix)
+					{
+						ns = new MemberType {
+							Target = MakeGlobal(),
+							IsDoubleColon = true,
+							MemberName = namespaceName
+						};
+					}
+					else
+					{
+						ns = MakeSimpleType(namespaceName);
+					}
 					if (AddResolveResultAnnotations && nrr != null)
 						ns.AddAnnotation(nrr);
 					return ns;
 				}
 				else
 				{
-					var target = new SimpleType("global");
-					if (AddResolveResultAnnotations)
-						target.AddAnnotation(new NamespaceResolveResult(resolver.Compilation.RootNamespace));
 					var ns = new MemberType {
-						Target = target,
+						Target = MakeGlobal(),
 						IsDoubleColon = true,
 						MemberName = namespaceName
 					};
@@ -661,7 +672,7 @@ namespace ICSharpCode.Decompiler.CSharp.Syntax
 			{
 				string parentNamespace = namespaceName.Substring(0, pos);
 				string localNamespace = namespaceName.Substring(pos + 1);
-				var parentNS = ConvertNamespace(parentNamespace, out var parentNRR);
+				var parentNS = ConvertNamespace(parentNamespace, out var parentNRR, requiresGlobalPrefix);
 				var ns = new MemberType {
 					Target = parentNS,
 					MemberName = localNamespace
@@ -693,6 +704,14 @@ namespace ICSharpCode.Decompiler.CSharp.Syntax
 			if (name == "_")
 				return new SimpleType("@_");
 			return new SimpleType(name);
+		}
+
+		SimpleType MakeGlobal()
+		{
+			var global = new SimpleType("global");
+			if (AddResolveResultAnnotations && resolver != null)
+				global.AddAnnotation(new NamespaceResolveResult(resolver.Compilation.RootNamespace));
+			return global;
 		}
 
 		static MemberType MakeMemberType(AstType target, string name)
@@ -964,7 +983,7 @@ namespace ICSharpCode.Decompiler.CSharp.Syntax
 				throw new ArgumentNullException(nameof(type));
 			if (constantValue == null)
 			{
-				if (type.IsReferenceType == true || type.IsKnownType(KnownTypeCode.NullableOfT))
+				if (type.IsReferenceType == true || type.IsKnownType(KnownTypeCode.NullableOfT) || type.Kind.IsAnyPointer())
 				{
 					var expr = new NullReferenceExpression();
 					if (AddResolveResultAnnotations)
@@ -1953,10 +1972,9 @@ namespace ICSharpCode.Decompiler.CSharp.Syntax
 			}
 			if (this.ShowAccessibility && accessor.Accessibility != ownerAccessibility)
 				decl.Modifiers = ModifierFromAccessibility(accessor.Accessibility);
-			if (accessor.HasReadonlyModifier())
+			if (this.ShowModifiers && accessor.HasReadonlyModifier())
 				decl.Modifiers |= Modifiers.Readonly;
-			TokenRole keywordRole = kind switch
-			{
+			TokenRole keywordRole = kind switch {
 				MethodSemanticsAttributes.Getter => PropertyDeclaration.GetKeywordRole,
 				MethodSemanticsAttributes.Setter => PropertyDeclaration.SetKeywordRole,
 				MethodSemanticsAttributes.Adder => CustomEventDeclaration.AddKeywordRole,
@@ -2017,13 +2035,19 @@ namespace ICSharpCode.Decompiler.CSharp.Syntax
 
 		static void MergeReadOnlyModifiers(EntityDeclaration decl, Accessor accessor1, Accessor accessor2)
 		{
-			if (accessor1.HasModifier(Modifiers.Readonly) && accessor2.HasModifier(Modifiers.Readonly))
+			if (accessor1.HasModifier(Modifiers.Readonly) && accessor2.IsNull)
+			{
+				accessor1.Modifiers &= ~Modifiers.Readonly;
+				decl.Modifiers |= Modifiers.Readonly;
+			}
+			else if (accessor1.HasModifier(Modifiers.Readonly) && accessor2.HasModifier(Modifiers.Readonly))
 			{
 				accessor1.Modifiers &= ~Modifiers.Readonly;
 				accessor2.Modifiers &= ~Modifiers.Readonly;
 				decl.Modifiers |= Modifiers.Readonly;
 			}
 		}
+
 		IndexerDeclaration ConvertIndexer(IProperty indexer)
 		{
 			IndexerDeclaration decl = new IndexerDeclaration();

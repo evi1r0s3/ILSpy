@@ -273,6 +273,7 @@ namespace ICSharpCode.Decompiler.CSharp.OutputVisitor
 				if (!(role == PropertyDeclaration.GetterRole || role == PropertyDeclaration.SetterRole))
 					return false;
 				bool isAutoProperty = accessor.Body.IsNull
+					&& !accessor.Attributes.Any()
 					&& policy.AutoPropertyFormatting == PropertyFormatting.SingleLine;
 				return isAutoProperty;
 			}
@@ -2003,14 +2004,14 @@ namespace ICSharpCode.Decompiler.CSharp.OutputVisitor
 			switchExpression.Expression.AcceptVisitor(this);
 			Space();
 			WriteKeyword(SwitchExpression.SwitchKeywordRole);
-			OpenBrace(policy.StatementBraceStyle);
+			OpenBrace(policy.ArrayInitializerBraceStyle);
 			foreach (AstNode node in switchExpression.SwitchSections)
 			{
 				node.AcceptVisitor(this);
 				Comma(node);
 				NewLine();
 			}
-			CloseBrace(policy.StatementBraceStyle);
+			CloseBrace(policy.ArrayInitializerBraceStyle);
 			EndNode(switchExpression);
 		}
 
@@ -2434,7 +2435,9 @@ namespace ICSharpCode.Decompiler.CSharp.OutputVisitor
 				bool isSingleLine =
 					(policy.AutoPropertyFormatting == PropertyFormatting.SingleLine)
 					&& (indexerDeclaration.Getter.IsNull || indexerDeclaration.Getter.Body.IsNull)
-					&& (indexerDeclaration.Setter.IsNull || indexerDeclaration.Setter.Body.IsNull);
+					&& (indexerDeclaration.Setter.IsNull || indexerDeclaration.Setter.Body.IsNull)
+					&& !indexerDeclaration.Getter.Attributes.Any()
+					&& !indexerDeclaration.Setter.Attributes.Any();
 				OpenBrace(isSingleLine ? BraceStyle.EndOfLine : policy.PropertyBraceStyle, newLine: !isSingleLine);
 				if (isSingleLine)
 					Space();
@@ -2575,7 +2578,9 @@ namespace ICSharpCode.Decompiler.CSharp.OutputVisitor
 				bool isSingleLine =
 					(policy.AutoPropertyFormatting == PropertyFormatting.SingleLine)
 					&& (propertyDeclaration.Getter.IsNull || propertyDeclaration.Getter.Body.IsNull)
-					&& (propertyDeclaration.Setter.IsNull || propertyDeclaration.Setter.Body.IsNull);
+					&& (propertyDeclaration.Setter.IsNull || propertyDeclaration.Setter.Body.IsNull)
+					&& !propertyDeclaration.Getter.Attributes.Any()
+					&& !propertyDeclaration.Setter.Attributes.Any();
 				OpenBrace(isSingleLine ? BraceStyle.EndOfLine : policy.PropertyBraceStyle, newLine: !isSingleLine);
 				if (isSingleLine)
 					Space();

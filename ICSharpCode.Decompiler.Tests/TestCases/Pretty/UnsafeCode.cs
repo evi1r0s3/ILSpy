@@ -530,6 +530,18 @@ namespace ICSharpCode.Decompiler.Tests.TestCases.Pretty
 			num.ToString();
 		}
 
+#if CS73
+		private unsafe static int Issue2287(ref StructWithFixedSizeMembers value)
+		{
+			return value.Integers[0] + value.Integers[1];
+		}
+#endif
+
+		private unsafe static int Issue2305(StructWithFixedSizeMembers value, StringComparison s)
+		{
+			return value.Integers[(int)s];
+		}
+
 		private unsafe static void* CastToVoidPtr(IntPtr intptr)
 		{
 			return (void*)intptr;
@@ -543,6 +555,29 @@ namespace ICSharpCode.Decompiler.Tests.TestCases.Pretty
 		private unsafe static void* CastToVoidPtr(int* intptr)
 		{
 			return intptr;
+		}
+
+		public unsafe void ConditionalPointer(bool a, int* ptr)
+		{
+			UsePointer(a ? ptr : null);
+		}
+
+		public unsafe void UseArrayOfPointers(int*[] arr)
+		{
+			for (int i = 0; i < arr.Length; i++)
+			{
+				arr[i] = null;
+			}
+		}
+
+		public unsafe void PassNullPointer1()
+		{
+			PointerReferenceExpression(null);
+		}
+
+		public unsafe void PassNullPointer2()
+		{
+			UseArrayOfPointers(null);
 		}
 	}
 }
